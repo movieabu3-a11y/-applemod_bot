@@ -76,6 +76,10 @@ def get_settings():
     return ch_id, ch_url, p_info
 
 async def check_subscription(user_id: int) -> bool:
+    # Admin har doim tekshiruvdan o'tadi
+    if user_id == ADMIN_ID:
+        return True
+
     cursor.execute("SELECT is_premium FROM users WHERE user_id=?", (user_id,))
     res = cursor.fetchone()
     if res and res[0] == 1:
@@ -87,11 +91,12 @@ async def check_subscription(user_id: int) -> bool:
         return member.status in [ChatMemberStatus.MEMBER, ChatMemberStatus.CREATOR, ChatMemberStatus.ADMINISTRATOR]
     except Exception as e:
         logging.error(f"A'zolik tekshirishda xato: {e}")
-        return True 
+        return False  # Xatolik bo'lsa obunani majburlaymiz
 
 # --- KLAVIATURALAR ---
 def get_main_keyboard(user_id):
     buttons = [[KeyboardButton(text="🍏 Apple Game boshlash")]]
+    # Admin bo'lsa, har doim admin tugmasini ko'rsatish
     if user_id == ADMIN_ID:
         buttons.append([KeyboardButton(text="🔐 Admin Panel")])
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
@@ -132,20 +137,21 @@ async def command_start_handler(message: Message, state: FSMContext) -> None:
                        (message.from_user.id, message.from_user.username))
         conn.commit()
 
-    if await check_subscription(message.from_user.id):
+    # Agar foydalanuvchi admin bo'lsa, majburiy obunasiz to'g'ridan-to'g'ri menyu ochiladi
+    if message.from_user.id == ADMIN_ID or await check_subscription(message.from_user.id):
         await message.answer(
             f"Xush kelibsiz! O'yinni boshlash uchun pastdagi <tg-emoji emoji-id=\"{APPLE_GAME_EMOJI_ID}\">🍏</tg-emoji> <b>Apple Game boshlash</b> tugmasini bosing:", 
             reply_markup=get_main_keyboard(message.from_user.id)
         )
     else:
-        # Majburiy obuna inline tugmalari
+        # Oddiy foydalanuvchi obuna bo'lmagan bo'lsa, majburiy obunani chiqaramiz:
         markup = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🛡️ Obuna bo'lish", url=channel_url)],
             [InlineKeyboardButton(text="✅ Tekshirish", callback_data="check_sub")],
             [InlineKeyboardButton(text="💎 «PREMIUM» olish", url=p_info)]
         ])
         
-        # Siz bergan 3 ta maxsus stikerni matn ichida tugmalarga moslab chiqaramiz:
+        # Tugmalar uchun siz bergan 3 ta premium stikerni matnda chiqaramiz
         await message.answer(
             f"⚠️ <b>Botdan foydalanish uchun quyidagi kanallarga obuna bo'ling!</b>\n\n"
             f"<tg-emoji emoji-id=\"{OBUNA_EMOJI_ID}\">📢</tg-emoji> — Pastdagi tugma orqali a'zo bo'ling\n"
@@ -159,7 +165,10 @@ async def command_start_handler(message: Message, state: FSMContext) -> None:
 async def check_sub_callback(callback: CallbackQuery):
     if await check_subscription(callback.from_user.id):
         await callback.message.delete()
-        await callback.message.answer("Rahmat! Endi cheklovlarsiz o'ynashingiz mumkin. 🎉", reply_markup=get_main_keyboard(callback.from_user.id))
+        await callback.message.answer(
+            "Rahmat! Endi cheklovlarsiz o'ynashingiz mumkin. 🎉", 
+            reply_markup=get_main_keyboard(callback.from_user.id)
+        )
     else:
         await callback.answer("❌ Hali kanalga a'zo bo'lmadingiz yoki Premium emassiz!", show_alert=True)
 
@@ -168,6 +177,8 @@ async def check_sub_callback(callback: CallbackQuery):
 @dp.message(F.text == "🍏 Apple Game boshlash")
 async def start_game_handler(message: Message, state: FSMContext):
     if not await check_subscription(message.from_user.id):
+        # Obuna bo'lmagan bo'lsa start buyrug'iga qaytaramiz
+        await command_start_handler(message, state)
         return
     
     await state.set_state(GameStates.playing)
@@ -182,6 +193,7 @@ async def start_game_handler(message: Message, state: FSMContext):
 async def play_step_handler(message: Message, state: FSMContext):
     if not await check_subscription(message.from_user.id):
         await state.clear()
+        await command_start_handler(message, state)
         return
 
     data = await state.get_data()
