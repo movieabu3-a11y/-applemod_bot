@@ -68,35 +68,47 @@ class GameStates(StatesGroup):
 # --- YORDAMCHI FUNKSIYALAR ---
 def get_settings():
     cursor.execute("SELECT value FROM settings WHERE key='channel_id'")
-    ch_id = int(cursor.fetchone()[0])
+    ch_id_row = cursor.fetchone()
+    ch_id = int(ch_id_row[0]) if ch_id_row else -100123456789
+    
     cursor.execute("SELECT value FROM settings WHERE key='channel_url'")
-    ch_url = cursor.fetchone()[0]
+    ch_url_row = cursor.fetchone()
+    ch_url = ch_url_row[0] if ch_url_row else "https://t.me/Sizning_Kanalingiz"
+    
     cursor.execute("SELECT value FROM settings WHERE key='premium_info'")
-    p_info = cursor.fetchone()[0]
+    p_info_row = cursor.fetchone()
+    p_info = p_info_row[0] if p_info_row else "https://t.me/kazino_apklari"
+    
     return ch_id, ch_url, p_info
 
 async def check_subscription(user_id: int) -> bool:
-    # Admin har doim tekshiruvdan o'tadi
+    # 1. Admin har doim tekshiruvdan o'tadi
     if user_id == ADMIN_ID:
         return True
 
+    # 2. Premium sotib olgan foydalanuvchi har doim o'tadi
     cursor.execute("SELECT is_premium FROM users WHERE user_id=?", (user_id,))
     res = cursor.fetchone()
     if res and res[0] == 1:
         return True
 
+    # 3. Kanalga a'zolikni tekshirish
     channel_id, _, _ = get_settings()
+    if str(channel_id) == "-100123456789":
+        # Agar kanal hali sozlanmagan bo'lsa, xatolik chiqmasligi uchun True qaytaramiz
+        return True
+        
     try:
         member = await bot.get_chat_member(chat_id=channel_id, user_id=user_id)
         return member.status in [ChatMemberStatus.MEMBER, ChatMemberStatus.CREATOR, ChatMemberStatus.ADMINISTRATOR]
     except Exception as e:
         logging.error(f"A'zolik tekshirishda xato: {e}")
-        return False  # Xatolik bo'lsa obunani majburlaymiz
+        # Telegram API xatoga tushsa, foydalanuvchi qiynalmasligi uchun ruxsat beramiz
+        return True 
 
 # --- KLAVIATURALAR ---
 def get_main_keyboard(user_id):
     buttons = [[KeyboardButton(text="🍏 Apple Game boshlash")]]
-    # Admin bo'lsa, har doim admin tugmasini ko'rsatish
     if user_id == ADMIN_ID:
         buttons.append([KeyboardButton(text="🔐 Admin Panel")])
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
@@ -137,21 +149,20 @@ async def command_start_handler(message: Message, state: FSMContext) -> None:
                        (message.from_user.id, message.from_user.username))
         conn.commit()
 
-    # Agar foydalanuvchi admin bo'lsa, majburiy obunasiz to'g'ridan-to'g'ri menyu ochiladi
+    # Agar a'zo bo'lgan bo'lsa yoki admin bo'lsa
     if message.from_user.id == ADMIN_ID or await check_subscription(message.from_user.id):
         await message.answer(
             f"Xush kelibsiz! O'yinni boshlash uchun pastdagi <tg-emoji emoji-id=\"{APPLE_GAME_EMOJI_ID}\">🍏</tg-emoji> <b>Apple Game boshlash</b> tugmasini bosing:", 
             reply_markup=get_main_keyboard(message.from_user.id)
         )
     else:
-        # Oddiy foydalanuvchi obuna bo'lmagan bo'lsa, majburiy obunani chiqaramiz:
+        # Obuna bo'lmaganlarga majburiy obuna oynasi
         markup = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🛡️ Obuna bo'lish", url=channel_url)],
             [InlineKeyboardButton(text="✅ Tekshirish", callback_data="check_sub")],
             [InlineKeyboardButton(text="💎 «PREMIUM» olish", url=p_info)]
         ])
         
-        # Tugmalar uchun siz bergan 3 ta premium stikerni matnda chiqaramiz
         await message.answer(
             f"⚠️ <b>Botdan foydalanish uchun quyidagi kanallarga obuna bo'ling!</b>\n\n"
             f"<tg-emoji emoji-id=\"{OBUNA_EMOJI_ID}\">📢</tg-emoji> — Pastdagi tugma orqali a'zo bo'ling\n"
@@ -176,22 +187,23 @@ async def check_sub_callback(callback: CallbackQuery):
 
 @dp.message(F.text == "🍏 Apple Game boshlash")
 async def start_game_handler(message: Message, state: FSMContext):
-    if not await check_subscription(message.from_user.id):
-        # Obuna bo'lmagan bo'lsa start buyrug'iga qaytaramiz
+    # Agar obunani muvaffaqiyatli topshirgan bo'lsa (yoki admin bo'lsa)
+    if message.from_user.id == ADMIN_ID or await check_subscription(message.from_user.id):
+        await state.set_state(GameStates.playing)
+        await state.update_data(current_step=1, steps_log="")
+        
+        await message.answer(
+            f"O'yin boshlandi! 1-bosqich raqamini olish uchun pastdagi <tg-emoji emoji-id=\"{STEP_EMOJI_ID}\">🎲</tg-emoji> tugmasini bosing👇", 
+            reply_markup=get_game_keyboard(1)
+        )
+    else:
+        # Obuna bo'lmagan bo'lsa majburiy start xabarini yuboramiz
         await command_start_handler(message, state)
-        return
-    
-    await state.set_state(GameStates.playing)
-    await state.update_data(current_step=1, steps_log="")
-    
-    await message.answer(
-        f"O'yin boshlandi! 1-bosqich raqamini olish uchun pastdagi <tg-emoji emoji-id=\"{STEP_EMOJI_ID}\">🎲</tg-emoji> tugmasini bosing👇", 
-        reply_markup=get_game_keyboard(1)
-    )
 
 @dp.message(GameStates.playing, F.text.regexp(r"^🎲 \d+-bosqich raqamini olish$"))
 async def play_step_handler(message: Message, state: FSMContext):
-    if not await check_subscription(message.from_user.id):
+    # Har safar bosganda tekshiramiz
+    if not (message.from_user.id == ADMIN_ID or await check_subscription(message.from_user.id)):
         await state.clear()
         await command_start_handler(message, state)
         return
@@ -203,12 +215,12 @@ async def play_step_handler(message: Message, state: FSMContext):
     num = random.randint(1, 5)
     new_log = steps_log + f"{step}-bosqich: <b>{num}</b>\n"
     
-    # 1. Natijalar xabari (Boshida premium stiker bilan)
+    # 1. Natijalar xabari
     await message.answer(
         f"<tg-emoji emoji-id=\"{APPLE_GAME_EMOJI_ID}\">🍏</tg-emoji> <b>Apple Game Natijalari:</b>\n\n{new_log}"
     )
     
-    # 2. Ogohlantirish xabari (Boshida premium ogohlantirish stikeri bilan)
+    # 2. Ogohlantirish xabari
     await message.answer(
         f"<tg-emoji emoji-id=\"{WARNING_EMOJI_ID}\">🔴</tg-emoji> <b>Ogohlantirish</b>\n\n"
         f"Ushbu bot faqat https://t.me/kazino_apklari kanalidagi ilovalarda ishlaydi."
